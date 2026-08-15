@@ -24,6 +24,8 @@ jobs:
   fetch-and-upload:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PS_PROXY: ""          # runner 海外直连 api.proxyscrape.com，不设会走默认 7890 失败
     steps:
       - uses: actions/checkout@v4
       - name: 安装 Python 依赖

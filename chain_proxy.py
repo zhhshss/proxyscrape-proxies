@@ -124,9 +124,10 @@ def pipe(src, dst):
             pass
 
 
-def handle(client, isp):
+def handle(client, isps, start_idx):
+    """处理一次 CONNECT，失败则顺次尝试后续 ISP（每个最多建连一次）。"""
     try:
-        client.settimeout(20)
+        client.settimeout(25)
         data = b""
         while b"\r\n\r\n" not in data:
             d = client.recv(4096)
@@ -141,13 +142,24 @@ def handle(client, isp):
         target = parts[1].decode()
         host, ps = target.rsplit(":", 1)
         port = int(ps)
-        up = connect_through_isp(isp, host, port)
+        up = None
+        for k in range(len(isps)):
+            isp = isps[(start_idx + k) % len(isps)]
+            try:
+                up = connect_through_isp(isp, host, port)
+                break
+            except Exception:
+                up = None
+                continue
+        if up is None:
+            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            return
         client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
         t1 = threading.Thread(target=pipe, args=(client, up), daemon=True)
         t2 = threading.Thread(target=pipe, args=(up, client), daemon=True)
         t1.start(); t2.start()
         t1.join(); t2.join()
-    except Exception as e:
+    except Exception:
         try:
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         except Exception:
@@ -168,9 +180,9 @@ def main():
     idx = 0
     while True:
         c, _ = srv.accept()
-        isp = ISPS[idx % len(ISPS)]
-        idx += 1
-        threading.Thread(target=handle, args=(c, isp), daemon=True).start()
+        start = idx
+        idx = (idx + 1) % len(ISPS)
+        threading.Thread(target=handle, args=(c, ISPS, start), daemon=True).start()
 
 
 if __name__ == "__main__":

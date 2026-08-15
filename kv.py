@@ -9,10 +9,13 @@
     方式 B（Global API Key）:  CLOUDFLARE_API_KEY + CLOUDFLARE_API_EMAIL
     公共:                  CLOUDFLARE_ACCOUNT_ID、KV_NAMESPACE_ID
 
-KV key 结构:
-    proxyscrape:latest       固定 key，始终指向最新活跃代理（方便 Worker 读）
-    proxyscrape:YYYY-MM-DD   该日期批次
-清理逻辑: 上传今天批次后，删除 6 天前的 proxyscrape:<date-6d>。
+KV key 结构（前缀可用 KV_KEY_PREFIX 覆盖，默认 proxyscrape:）:
+    <prefix>latest           固定 key，始终指向最新活跃代理（方便 Worker 读）
+    <prefix>YYYY-MM-DD       该日期批次
+清理逻辑: 上传今天批次后，删除 6 天前的 <prefix><date-6d>。
+
+例: register-accounts 用 KV_KEY_PREFIX=proxyscrape:trial: 上传 trial 代理，
+    不与免费代理（proxyscrape:）互相覆盖。
 """
 import os
 import sys
@@ -30,6 +33,7 @@ NS = os.environ["KV_NAMESPACE_ID"]
 TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 KEY = os.environ.get("CLOUDFLARE_API_KEY", "").strip()
 EMAIL = os.environ.get("CLOUDFLARE_API_EMAIL", "").strip()
+PREFIX = os.environ.get("KV_KEY_PREFIX", "proxyscrape:")
 
 
 def _auth_headers():
@@ -86,9 +90,9 @@ def main():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     old = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%Y-%m-%d")
 
-    put_value(f"proxyscrape:{today}", content)
-    put_value("proxyscrape:latest", content)
-    delete_key(f"proxyscrape:{old}")
+    put_value(f"{PREFIX}{today}", content)
+    put_value(f"{PREFIX}latest", content)
+    delete_key(f"{PREFIX}{old}")
     print("完成", flush=True)
 
 

@@ -150,6 +150,49 @@ class MailTM(MailProvider):
         raise TimeoutError("等验证码超时")
 
 
+class Tempmailc(MailProvider):
+    """https://tempmailc.com —— 关键：mail.tm 域名被判 disposable 不发 trial，
+    而 kojoball.email 注册后直接带 Premium trial 子账户（实测 2026-08）。"""
+    BASE = "https://tempmailc.com/api/v1"
+
+    def create(self):
+        def _do():
+            r = requests.get(f"{self.BASE}/new", headers={"Accept": "application/json"},
+                             proxies=MAIL_PROXIES, timeout=20)
+            r.raise_for_status()
+            addr = str(r.json().get("email") or "").lower()
+            if not addr:
+                raise RuntimeError(f"tempmailc new 空: {r.text[:200]}")
+            return addr, {"address": addr}
+        d = _retry(_do, tries=3, what="tempmailc 建邮箱")
+        log(f"临时邮箱: {d[0]}")
+        return d
+
+    def wait_code(self, creds, timeout=180, interval=5):
+        address = creds.get("address")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            lst = requests.get(f"{self.BASE}/inbox", params={"email": address},
+                               headers={"Accept": "application/json"},
+                               proxies=MAIL_PROXIES, timeout=20).json()
+            for m in lst.get("messages", []):
+                if "verification" not in str(m.get("subject", "")).lower():
+                    continue
+                d = requests.get(f"{self.BASE}/message",
+                                 params={"email": address, "msg_id": m["id"]},
+                                 headers={"Accept": "application/json"},
+                                 proxies=MAIL_PROXIES, timeout=20).json()
+                raw = d.get("html") or ""
+                html = " ".join(raw) if isinstance(raw, list) else str(raw)
+                txt = _html.unescape(re.sub(r"<[^>]+>", " ", html))
+                mo = re.search(r"verification code:\s*([A-Za-z0-9]{6,})", txt, re.I)
+                if mo:
+                    log(f"收到验证码: {mo.group(1)}  (主题: {d.get('subject')})")
+                    return mo.group(1)
+            time.sleep(interval)
+        raise TimeoutError("等验证码超时")
+
+
 class YYDS(MailProvider):
     BASE = "https://maliapi.215.im/v1"
 
@@ -197,9 +240,11 @@ class YYDS(MailProvider):
 
 
 def get_mail_provider():
+    # mail.tm 的域名（emalupe.com 等）会被 dashboard 判定为 disposable 拒绝发 trial，
+    # 必须用 tempmailc（kojoball.email）。YYDS 优先可覆盖。
     if os.environ.get("YYDS_API_KEY", "").strip():
         return YYDS()
-    return MailTM()
+    return Tempmailc()
 
 
 # ── 本地打码：浏览器只出 Turnstile token ────────────────
@@ -257,6 +302,10 @@ def solve_turnstile(headless=True, timeout=90):
                  "--disable-gpu", "--window-size=1280,900",
                  "--disable-blink-features=AutomationControlled"):
         opts.set_argument(flag)
+    if headless:
+        # 注意：DrissionPage 4.x 里 set_argument('--headless=new') 不会置 is_headless，
+        # 导致 __init__ 判定 headless 不一致而 quit 浏览器，必须分两个参数传。
+        opts.set_argument("--headless", "new")
     if os.path.isdir(_TURNSTILE_EXT):
         try:
             opts.add_extension(_TURNSTILE_EXT)
@@ -373,7 +422,7 @@ def fetch_proxies(access_token, account_id):
 
     def _list():
         r = requests.get(f"{PS_BASE}/v2/v4/account/{account_id}/datacenter_shared/proxy-list",
-                         headers=h, params={"protocol": "http", "format": "normal"},
+                         headers=h, params={"type": "getproxies", "protocol": "http"},
                          proxies=PROXIES, timeout=25)
         r.raise_for_status()
         return r.text

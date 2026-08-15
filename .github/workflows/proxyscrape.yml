@@ -1,0 +1,100 @@
+name: proxyscrape-proxies
+
+on:
+  schedule:
+    # 每 6 天：每月 6/12/18/24/30 号 03:23 UTC
+    - cron: '23 3 6,12,18,24,30 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxyscrape-proxies
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+  CLOUDFLARE_API_EMAIL: ${{ secrets.CLOUDFLARE_API_EMAIL }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+
+jobs:
+  # ── 主流程：免费公共代理列表 → KV（代理来源，稳定）──────────
+  fetch-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Python 依赖
+        run: pip install -q requests
+      - name: 拉取免费公共代理列表
+        id: fetch
+        run: |
+          OUT=$(python3 fetch_free.py 1500)
+          echo "$OUT"
+          NODE_FILE=$(echo "$OUT" | grep -oE 'NODE_FILE=[^ ]+' | cut -d= -f2)
+          echo "NODE_FILE=$NODE_FILE" >> "$GITHUB_OUTPUT"
+          if [ -z "$NODE_FILE" ] || [ ! -s "$NODE_FILE" ]; then
+            echo "::warning:: 免费列表为空，跳过上传"
+            exit 1
+          fi
+      - name: 上传 KV + 清理 6 天前批次
+        run: python3 kv.py "${{ steps.fetch.outputs.NODE_FILE }}"
+      - name: 归档代理批次
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxies-${{ github.run_id }}
+          path: node/
+          retention-days: 7
+
+  # ── 注册机：每 6 天注册 3 个号（走 US ISP 代理绕 region 封锁）──
+  # 注意：Premium datacenter 免费 trial 当前不存在（逆向确认），
+  # 注册账号本身没有代理可拉，账号资产归档备用。
+  register-accounts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: fetch-and-upload
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 写入 ISP 代理列表
+        run: |
+          printf '%s\n' "${{ secrets.ISP_PROXIES }}" > /tmp/isp.txt
+          wc -l /tmp/isp.txt
+
+      - name: 安装 Chrome + xvfb + 依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
+            libgtk-3-0 libxshmfence1 fonts-liberation
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y -qq
+          google-chrome --version
+          pip install -q DrissionPage requests
+
+      - name: 启动 US ISP 链式代理（runner 海外直连 ISP）
+        run: |
+          CHAIN_DIRECT=1 ISP_FILE=/tmp/isp.txt python3 chain_proxy.py 18791 > /tmp/chain.log 2>&1 &
+          sleep 2
+          cat /tmp/chain.log
+          curl -s -x http://127.0.0.1:18791 -m 20 https://ipinfo.io/json | python3 -c "import sys,json;d=json.load(sys.stdin);print('出口:',d.get('ip'),d.get('country'))"
+
+      - name: 批量注册 3 个账号（US ISP 出口）
+        id: batch
+        run: |
+          OUT=$(xvfb-run -a -s '-screen 0 1440x900x24' python3 batch_register.py 3)
+          echo "$OUT"
+        env:
+          PS_PROXY: "http://127.0.0.1:18791"   # 注册走链式 US ISP
+          PS_MAIL_PROXY: ""                      # mail.tm 直连
+
+      - name: 归档账号
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accounts-${{ github.run_id }}
+          path: account/
+          retention-days: 7

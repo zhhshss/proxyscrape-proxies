@@ -1,0 +1,10 @@
+# 账号/代理/本地临时文件不进仓库
+account/
+node/
+__pycache__/
+*.pyc
+.venv/
+.env
+proxyscrape_token.json
+isp_ok.txt
+.chrome-*/

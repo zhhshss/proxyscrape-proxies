@@ -11,15 +11,14 @@ ProxyScrape dashboard 注册机 - 完整版
   · 重发验证码 POST /v2/v4/account/reset-verification-code（注册后不会自动发，必须先调一次）
   · Turnstile sitekey = 0x4AAAAAAAFWUVCKyusT9T8r
 
-流程：临时邮箱 → 本地浏览器出 Turnstile token → 协议注册 → 触发重发验证码 →
-      收信取码 → 验邮箱 → 拉免费 datacenter 代理（trial 自带 100 个）。
+流程：临时邮箱 → 本地 Turnstile Solver API 出 token → 协议注册 → 触发重发验证码 →
+      收信取码 → 验邮箱 → 拉 trial datacenter 代理（每账号 100 个）。
 
-依赖：DrissionPage / requests（系统 python3 已装，或用 grok 项目 .venv）
+依赖：requests；Turnstile 需要另跑 Turnstile-Solver-NEW（非 headless Chrome + Xvfb）。
 网络：dashboard 直连不通，必须走代理。默认 http://127.0.0.1:7890 (mihomo)。
-邮箱：默认 mail.tm（免费零配置）；设 YYDS_API_KEY 后自动切到 YYDS。
+邮箱：默认 tempmailc；设 YYDS_API_KEY 后自动切到 YYDS。
 用法：
-    python3 register.py            # 交互式：问注册数量/并发/是否隐藏窗口
-    PS_PROXY=socks5h://127.0.0.1:7890 python3 register.py
+    PS_SOLVER_URL=http://127.0.0.1:5072 PS_PROXY=http://127.0.0.1:18791 python3 batch_register.py 3
 """
 
 import os
@@ -51,17 +50,6 @@ PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 # 不受 PS_PROXY（可能指向链式 US ISP）影响 —— 链式代理对任意目标不稳定。
 _MAIL_PROXY = os.environ.get("PS_MAIL_PROXY", "").strip()
 MAIL_PROXIES = {"http": _MAIL_PROXY, "https": _MAIL_PROXY} if _MAIL_PROXY else None
-
-# turnstilePatch 扩展（隐藏自动化标识）。MV2 扩展在旧/定制 Chrome 有效，
-# 新版 Chrome 会静默忽略，靠 --disable-blink-features + DrissionPage 伪装兜底。
-_TURNSTILE_CANDIDATES = [
-    os.environ.get("TURNSTILE_EXTENSION_PATH", "").strip(),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "turnstilePatch"),
-    "/root/grok-reg-20260725/turnstilePatch",
-    "/root/grok-register-web/turnstilePatch",
-    "/root/ivycraft2api/registrar/turnstilePatch",
-]
-_TURNSTILE_EXT = next((p for p in _TURNSTILE_CANDIDATES if p and os.path.isdir(p)), "")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
@@ -247,120 +235,40 @@ def get_mail_provider():
     return Tempmailc()
 
 
-# ── 本地打码：浏览器只出 Turnstile token ────────────────
-_FILL_JS = r"""
-function setVal(el,val){
-  var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-  setter.call(el,val);
-  el.dispatchEvent(new Event('input',{bubbles:true}));
-  el.dispatchEvent(new Event('change',{bubbles:true}));
-}
-var email=document.querySelector('input[type=email]');
-var pwds=document.querySelectorAll('input[type=password]');
-var chk=document.querySelector('input[type=checkbox]');
-if(email) setVal(email,'warmup'+Date.now()+'@example.com');
-if(pwds[0]) setVal(pwds[0],'Warmup123!9');
-if(pwds[1]) setVal(pwds[1],'Warmup123!9');
-if(chk&&!chk.checked) chk.click();
-return 'filled';
-"""
-
-_GET_TOKEN_JS = r"""
-try{
-  var v=String((document.querySelector('input[name="cf-turnstile-response"]')||{}).value||'').trim();
-  if(v) return v;
-  if(window.turnstile && typeof turnstile.getResponse==='function')
-    return String(turnstile.getResponse()||'').trim();
-  return '';
-}catch(e){ return ''; }
-"""
-
-_SCREEN_INJECT_JS = r"""
-window.dtp=1;
-function ri(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
-Object.defineProperty(MouseEvent.prototype,'screenX',{value:ri(800,1200)});
-Object.defineProperty(MouseEvent.prototype,'screenY',{value:ri(400,700)});
-"""
-
-
+# ── Turnstile 打码：本地 Solver API ─────────────────────
 def solve_turnstile(headless=True, timeout=90):
-    """打开真实 sign-up 页，让 Turnstile 自动过（点 checkbox），读 token。"""
-    from DrissionPage import Chromium, ChromiumOptions
+    """通过本地 Turnstile Solver API（非 headless Chrome + Xvfb）获取 token。"""
+    import requests as _req
+    solver_url = os.environ.get("PS_SOLVER_URL", "http://127.0.0.1:5072")
+    # 创建任务
+    r = _req.get(f"{solver_url}/turnstile", params={
+        "url": PS_SIGNUP_PAGE,
+        "sitekey": PS_SITEKEY,
+    }, timeout=30)
+    data = r.json()
+    if data.get("errorId") != 0:
+        raise RuntimeError(f"Solver 创建任务失败: {data}")
+    task_id = data["taskId"]
+    log(f"Turnstile 任务 {task_id}, 等待结果…")
 
-    opts = ChromiumOptions()
-    # auto_port 在本机多任务/残留场景下连不上，改用固定端口+固定目录（GHA 串行够用）
-    _port = int(os.environ.get("PS_CHROME_PORT", "9225"))
-    opts.set_local_port(_port)
-    opts.set_user_data_path(os.path.join(_BASE, ".chrome-%d" % _port))
-    if PROXY:
+    # 轮询结果
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r2 = _req.get(f"{solver_url}/result", params={"id": task_id}, timeout=30)
         try:
-            opts.set_proxy(PROXY)
-        except Exception as e:
-            log(f"[!] 设置浏览器代理失败: {e}")
-    for flag in ("--no-first-run", "--no-sandbox", "--disable-dev-shm-usage",
-                 "--disable-background-networking", "--mute-audio",
-                 "--disable-gpu", "--window-size=1280,900",
-                 "--disable-blink-features=AutomationControlled"):
-        opts.set_argument(flag)
-    if headless:
-        # 注意：DrissionPage 4.x 里 set_argument('--headless=new') 不会置 is_headless，
-        # 导致 __init__ 判定 headless 不一致而 quit 浏览器，必须分两个参数传。
-        opts.set_argument("--headless", "new")
-    if os.path.isdir(_TURNSTILE_EXT):
-        try:
-            opts.add_extension(_TURNSTILE_EXT)
-        except Exception as e:
-            log(f"[!] 加载 turnstilePatch 扩展失败: {e}")
-    else:
-        log(f"[!] 未找到 turnstilePatch 扩展: {_TURNSTILE_EXT}")
-
-    browser = Chromium(opts)
-    tab = browser.latest_tab
-    try:
-        log("浏览器打开 sign-up 页…")
-        tab.get(PS_SIGNUP_PAGE)
-        time.sleep(5)
-        tab.run_js(_FILL_JS)
-        log("表单已填，预热 Turnstile…")
-        time.sleep(2)
-        try:
-            tab.run_js("try{if(window.turnstile&&turnstile.reset)turnstile.reset()}catch(e){}")
+            d2 = r2.json()
         except Exception:
-            pass
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            token = str(tab.run_js(_GET_TOKEN_JS) or "").strip()
+            d2 = {}
+        if d2.get("errorId") == 0 and d2.get("status") == "ready":
+            token = d2.get("solution", {}).get("token", "")
             if len(token) >= 80:
                 log(f"Turnstile 通过，token 长度={len(token)}")
                 return token
-
-            ci = tab.ele("@name=cf-turnstile-response", timeout=2)
-            if ci:
-                try:
-                    wrapper = ci.parent()
-                    iframe = wrapper.shadow_root.ele("tag:iframe", timeout=2)
-                except Exception:
-                    iframe = None
-                if iframe:
-                    try:
-                        iframe.run_js(_SCREEN_INJECT_JS)
-                    except Exception:
-                        pass
-                    try:
-                        body_sr = iframe.ele("tag:body").shadow_root
-                        btn = body_sr.ele("tag:input", timeout=2)
-                        if btn:
-                            btn.click()
-                    except Exception:
-                        pass
-            time.sleep(1.2)
-        raise TimeoutError("Turnstile 求解超时")
-    finally:
-        try:
-            browser.quit()
-        except Exception:
-            pass
+            raise RuntimeError(f"Solver 返回 token 过短: {len(token)}")
+        if d2.get("status") == "fail":
+            raise RuntimeError(f"Solver 求解失败: {d2}")
+        time.sleep(2)
+    raise TimeoutError(f"Turnstile 求解超时 {timeout}s")
 
 
 # ── 注册协议 ────────────────────────────────────────────
@@ -577,26 +485,5 @@ def main():
     return 0
 
 
-# ── 最小 DrissionPage 启动调试（用于排查） ─────────────
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--debug":
-        print("=== 最小 DrissionPage 测试 ===")
-        from DrissionPage import Chromium, ChromiumOptions
-        co = ChromiumOptions()
-        co.auto_port()
-        co.set_argument("--no-sandbox")
-        co.set_argument("--disable-gpu")
-        try:
-            co.set_proxy("http://127.0.0.1:7890")
-            print("proxy set ok")
-        except Exception as e:
-            print("proxy fail", e)
-        b = Chromium(co)
-        t = b.latest_tab
-        t.get("https://dashboard.proxyscrape.com/v2/sign-up")
-        print("页面加载成功，title:", t.title[:60])
-        b.quit()
-        print("BROWSER OK")
-        sys.exit(0)
     main()

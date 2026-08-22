@@ -75,7 +75,7 @@ jobs:
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y -qq
           google-chrome --version
-          pip install -q DrissionPage requests
+          pip install -q DrissionPage requests patchright quart rich psutil
 
       - name: 启动 US ISP 链式代理（runner 海外直连 ISP）
         run: |
@@ -84,16 +84,28 @@ jobs:
           cat /tmp/chain.log
           curl -s -x http://127.0.0.1:18791 -m 20 https://ipinfo.io/json | python3 -c "import sys,json;d=json.load(sys.stdin);print('出口:',d.get('ip'),d.get('country'))"
 
+      - name: 拉取 Turnstile Solver API 并启动（非 headless + Xvfb）
+        run: |
+          git clone --depth 1 https://github.com/D3-vin/Turnstile-Solver-NEW.git
+          cd Turnstile-Solver-NEW
+          echo "http://127.0.0.1:18791" > proxies.txt
+          Xvfb :99 -screen 0 1440x900x24 -ac > /tmp/xvfb.log 2>&1 &
+          sleep 2
+          DISPLAY=:99 nohup python3 api.py --browser_type chrome --no-headless --thread 1 --port 5072 --proxy > /tmp/solver.log 2>&1 &
+          sleep 8
+          curl -s -m 5 http://127.0.0.1:5072/ | grep -o 'Welcome' | head -1
+
       - name: 批量注册 3 个账号（US ISP 出口，产出 trial 代理）
         id: batch
         run: |
-          OUT=$(xvfb-run -a -s '-screen 0 1440x900x24' python3 batch_register.py 3)
+          OUT=$(python3 batch_register.py 3)
           echo "$OUT"
           NODE_FILE=$(echo "$OUT" | grep -oE 'NODE_FILE=[^ ]+' | cut -d= -f2)
           echo "NODE_FILE=$NODE_FILE" >> "$GITHUB_OUTPUT"
         env:
           PS_PROXY: "http://127.0.0.1:18791"   # 注册走链式 US ISP
           PS_MAIL_PROXY: ""                      # tempmailc 邮箱 API 直连
+          PS_SOLVER_URL: "http://127.0.0.1:5072" # 本地 Turnstile Solver API
 
       - name: 上传 trial 代理到 KV（proxyscrape:trial:*）
         if: steps.batch.outputs.NODE_FILE != ''

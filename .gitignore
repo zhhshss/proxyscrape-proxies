@@ -8,3 +8,4 @@ __pycache__/
 proxyscrape_token.json
 isp_ok.txt
 .chrome-*/
+turnstilePatch/

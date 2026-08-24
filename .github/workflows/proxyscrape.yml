@@ -114,6 +114,13 @@ jobs:
         env:
           KV_KEY_PREFIX: "proxyscrape:trial:"
 
+      - name: 用 trial 代理覆盖 proxyscrape:latest（Worker 直接读这个）
+        if: steps.batch.outputs.NODE_FILE != ''
+        run: |
+          python3 kv.py "${{ steps.batch.outputs.NODE_FILE }}"
+        env:
+          KV_KEY_PREFIX: "proxyscrape:"
+
       - name: 归档账号 + trial 代理
         if: always()
         uses: actions/upload-artifact@v4

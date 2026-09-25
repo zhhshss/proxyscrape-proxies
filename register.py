@@ -142,10 +142,13 @@ class Tempmailc(MailProvider):
     """https://tempmailc.com —— 关键：mail.tm 域名被判 disposable 不发 trial，
     而 kojoball.email 注册后直接带 Premium trial 子账户（实测 2026-08）。"""
     BASE = "https://tempmailc.com/api/v1"
+    # 免费 API 按 UA 封脚本（python-requests/curl/okhttp 一律 429），
+    # 浏览器 UA 仍可直连（实测 2026-09）。
+    HDRS = {"Accept": "application/json", "User-Agent": UA}
 
     def create(self):
         def _do():
-            r = requests.get(f"{self.BASE}/new", headers={"Accept": "application/json"},
+            r = requests.get(f"{self.BASE}/new", headers=self.HDRS,
                              proxies=MAIL_PROXIES, timeout=20)
             r.raise_for_status()
             addr = str(r.json().get("email") or "").lower()
@@ -161,14 +164,14 @@ class Tempmailc(MailProvider):
         deadline = time.time() + timeout
         while time.time() < deadline:
             lst = requests.get(f"{self.BASE}/inbox", params={"email": address},
-                               headers={"Accept": "application/json"},
+                               headers=self.HDRS,
                                proxies=MAIL_PROXIES, timeout=20).json()
             for m in lst.get("messages", []):
                 if "verification" not in str(m.get("subject", "")).lower():
                     continue
                 d = requests.get(f"{self.BASE}/message",
                                  params={"email": address, "msg_id": m["id"]},
-                                 headers={"Accept": "application/json"},
+                                 headers=self.HDRS,
                                  proxies=MAIL_PROXIES, timeout=20).json()
                 raw = d.get("html") or ""
                 html = " ".join(raw) if isinstance(raw, list) else str(raw)
@@ -316,6 +319,33 @@ def whoami(session, access_token):
 
 
 # ── 拉免费 datacenter 代理 ──────────────────────────────
+def claim_trial(access_token):
+    """2026-09 起新注册号不再自动带 trial 子账户，需手动 claim：
+    POST /v2/v4/account/premium/claim-trial → 返回 trial 的 account_id。"""
+    h = {"Authorization": f"Bearer {access_token}", "User-Agent": UA,
+         "Origin": PS_BASE, "Referer": f"{PS_BASE}/v2/overview"}
+    r = requests.post(f"{PS_BASE}/v2/v4/account/premium/claim-trial",
+                      headers=h, proxies=PROXIES, timeout=25)
+    log(f"claim-trial 响应 {r.status_code}: {r.text[:160]}")
+    if r.status_code != 200:
+        raise RuntimeError(f"claim-trial HTTP {r.status_code}")
+    data = r.json()
+    if not data.get("success") or not data.get("account_id"):
+        raise RuntimeError(f"claim-trial 失败: {data}")
+    return data["account_id"]
+
+
+def whitelist_ip(access_token, account_id, ip):
+    """trial 代理是 IP 白名单认证（账密 407），须把出口 IP 加白（最多 maxips 个）。
+    GET /v2/v4/account/<id>/datacenter_shared/whitelist?type=set&ip[]=<ip>"""
+    h = {"Authorization": f"Bearer {access_token}", "User-Agent": UA, "Origin": PS_BASE}
+    base = f"{PS_BASE}/v2/v4/account/{account_id}/datacenter_shared/whitelist"
+    r = requests.get(base, headers=h, params={"type": "set", "ip[]": ip},
+                     proxies=PROXIES, timeout=25)
+    log(f"whitelist set {ip}: {r.status_code} {r.text[:140]}")
+    return r.ok and "whitelisted" in r.text
+
+
 def fetch_proxies(access_token, account_id):
     h = {"Authorization": f"Bearer {access_token}", "User-Agent": UA, "Origin": PS_BASE}
 
@@ -381,7 +411,13 @@ def register_once(mail, headless, node_file):
         try:
             subs = userdata.get("associatedSubaccounts") or []
             aid = subs[0].get("AccountID") if subs else None
+            if not aid:
+                # 2026-09：新号不再自动带 trial 子账户，手动 claim
+                aid = claim_trial(access_token)
             if aid:
+                wl = os.environ.get("PS_WHITELIST_IP", "").strip()
+                if wl:
+                    whitelist_ip(access_token, aid, wl)
                 p_user, p_pass, plist = fetch_proxies(access_token, aid)
                 save_proxies(p_user, p_pass, plist, node_file)
                 p_count = len(plist)

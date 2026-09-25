@@ -101,7 +101,12 @@ jobs:
           OUT=$(python3 batch_register.py 3)
           echo "$OUT"
           NODE_FILE=$(echo "$OUT" | grep -oE 'NODE_FILE=[^ ]+' | cut -d= -f2)
-          echo "NODE_FILE=$NODE_FILE" >> "$GITHUB_OUTPUT"
+          # 0 代理时 batch 会输出空文件路径，不算产出，跳过后续上传
+          if [ -n "$NODE_FILE" ] && [ -s "$NODE_FILE" ]; then
+            echo "NODE_FILE=$NODE_FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning:: 本次无代理产出，跳过 KV 上传"
+          fi
         env:
           PS_PROXY: "http://127.0.0.1:18791"   # 注册走链式 US ISP
           PS_MAIL_PROXY: ""                      # tempmailc 邮箱 API 直连
